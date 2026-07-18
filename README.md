@@ -46,6 +46,7 @@ Both flavours are wired into the same `security_block` module via a `CRYPTO_TYPE
 #### Prerequisites
 
 - **Verilator** (5.x+)
+- **GNU Make**
 
 #### Installation
 
