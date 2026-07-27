@@ -36,6 +36,19 @@ module tb (
     // Note: number of signers is hardcoded in the testcases!
     localparam int unsigned NUM_SIGNERS = 2;
 
+    // ---- License element stream ----
+    int  elem_idx = 0;
+    wire sig_ready;
+    wire sig_valid = license_valid && (elem_idx < int'(TOTAL_ELEMS));
+    wire [WIDTH-1:0] sig_data = license_elem_at(elem_idx);
+
+    // Stream pointer rewinds whenever no license transaction is in flight.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                      elem_idx <= 0;
+        else if (!license_valid)         elem_idx <= 0;
+        else if (sig_valid && sig_ready) elem_idx <= elem_idx + 1;
+    end
+
     security_block #(
         .CRYPTO_TYPE(1),
         .NUM_SIGNERS(NUM_SIGNERS)
@@ -46,6 +59,9 @@ module tb (
         .license_ready  (license_ready),
         .license        (license),
         .license_passed (),
+        .hss_sig_valid  (sig_valid),
+        .hss_sig_ready  (sig_ready),
+        .hss_sig_data   (sig_data),
         .slh_sig_valid  (1'b0),
         .slh_sig_ready  (),
         .slh_sig_data   ('0),
@@ -602,6 +618,7 @@ module tb (
                     if (nonce_ready) begin
                         // Replay signer-0's saved license against the rotated nonce
                         license       <= saved_license;
+                        stream_from_signer(0);  // replay signer-0's material
                         license_valid <= 1'b1;
                         saved_allow   <= allowance;
                         saved_nonce   <= nonce;

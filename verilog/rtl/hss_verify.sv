@@ -21,8 +21,11 @@
 //
 // Protocol:
 //   1. Assert valid and hold message, license stable until ready pulses
-//   2. ready pulses high for one cycle when verification completes
-//   3. When ready, check verif_passed: 1 = valid, 0 = invalid
+//   2. Supply signature elements on the sig_valid/ready/data stream as
+//      requested: per layer (HSS_LEVELS-1 down to 0), WOTS_P chain values
+//      then TREE_H auth path siblings
+//   3. ready pulses high for one cycle when verification completes
+//   4. When ready, check verif_passed: 1 = valid, 0 = invalid
 
 module hss_verify
     import arith_pkg::*;
@@ -36,6 +39,14 @@ module hss_verify
     // TODO replace individual public key inputs with the struct
     input  logic [IDENT_W-1:0] identifier,   // tree identifier
     input  logic [WIDTH-1:0]   root_pub_key,
+
+    // License element stream: one 256-bit element per beat. Per layer, from
+    // layer HSS_LEVELS-1 down to 0: WOTS_P chain signatures followed by
+    // TREE_H authentication path siblings. WOTS and Merkle never request an
+    // element in the same cycle, so a single stream serves both.
+    input  logic               sig_valid,
+    output logic               sig_ready,
+    input  logic [WIDTH-1:0]   sig_data,
 
     output logic               ready,
     output logic               verif_passed
@@ -54,8 +65,8 @@ module hss_verify
     } wots_state_e;
 
 
-    typedef enum logic [0:0] {
-        StMrklInit, StMrklHash
+    typedef enum logic [1:0] {
+        StMrklInit, StMrklLoad, StMrklHash
     } mrkl_state_e;
 
     // -------------------------------------------------------------------------
@@ -134,10 +145,8 @@ module hss_verify
     // Data indexed by WOTS chain / Merkle level
     // -------------------------------------------------------------------------
 
-    wire [WIDTH-1:0] cur_sig_chain = license.sig_chains[layer_q][wots_chain_q];
     wire             last_chain    = (int'(wots_chain_q) == WOTS_P-1) ? 1'b1 : 1'b0;
 
-    wire [WIDTH-1:0] cur_auth_node = license.auth_path[layer_q][mrkl_level_q];
     wire             last_level    = (int'(mrkl_level_q) == TREE_H-1) ? 1'b1 : 1'b0;
 
     // -------------------------------------------------------------------------
@@ -291,6 +300,9 @@ module hss_verify
     // Merkle helpers
     // -------------------------------------------------------------------------
 
+    wire mrkl_wants = (seq_q == StMerkle) && (mrkl_q == StMrklLoad);
+    wire mrkl_loading = mrkl_wants && sig_valid;
+
     // Nodes are indexed as 2n (left) and 2n+1 (right) from their parent
     wire [31:0]      parent_num = node_index_q >> 1; // node / 2
     wire             is_right   = node_index_q[0];
@@ -299,8 +311,8 @@ module hss_verify
     logic [WIDTH-1:0] left_node;
     logic [WIDTH-1:0] right_node;
 
-    assign {left_node, right_node} = is_right ? {cur_auth_node, hash_reg_q}
-                                              : {hash_reg_q,    cur_auth_node};
+    assign {left_node, right_node} = is_right ? {aux_reg_q,  hash_reg_q}
+                                              : {hash_reg_q, aux_reg_q};
 
     // -------------------------------------------------------------------------
     // Merkle: H(I || parent || D_INTR || left || right)
@@ -402,10 +414,12 @@ module hss_verify
     // hash_reg — captures sha_digest on completion, or sig chain on WOTS load
     // -------------------------------------------------------------------------
 
-    wire wots_loading = (seq_q == StWots) && (wots_q == StWotsLoad);
+    wire wots_wants = (seq_q == StWots) && (wots_q == StWotsLoad);
+    wire wots_loading = wots_wants && sig_valid;
+    assign sig_ready = wots_wants || mrkl_wants;
     wire hash_reg_en  = wots_loading | hash_complete;
 
-    assign hash_reg_d = (!wots_loading) ? sha_digest : cur_sig_chain;
+    assign hash_reg_d = (!wots_loading) ? sha_digest : sig_data;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -421,12 +435,14 @@ module hss_verify
 
     wire wots_init  = (seq_q == StWots) && (wots_q == StWotsInit);
 
-    assign aux_reg_d = hash_reg_q;
+    // Two producers: the Q digest before WOTS, and each auth sibling as it
+    // arrives on the stream. They never overlap (WOTS finishes before Merkle).
+    assign aux_reg_d = mrkl_loading ? sig_data : hash_reg_q;
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             aux_reg_q <= '0;
-        end else if (wots_init) begin
+        end else if (wots_init || mrkl_loading) begin
             aux_reg_q <= aux_reg_d;
         end
     end
@@ -473,13 +489,16 @@ module hss_verify
                 end
 
                 StWotsLoad: begin
-                    wots_step_d = cur_digit; // load step counter from the signed digit
-                    // hash_reg captures chain signature this cycle also
-                    // (outside this always_comb since hash_reg is shared)
+                    // Stall until the next chain element arrives on the stream.
+                    if (sig_valid) begin
+                        wots_step_d = cur_digit; // load step counter from the signed digit
+                        // hash_reg captures chain signature this cycle also
+                        // (outside this always_comb since hash_reg is shared)
 
-                    // start hashing if the digit is not the maximum value,
-                    // otherwise move to store right away
-                    wots_d = (cur_digit != WOTS_MAX_COEF) ? StWotsHash : StWotsPkStore;
+                        // start hashing if the digit is not the maximum value,
+                        // otherwise move to store right away
+                        wots_d = (cur_digit != WOTS_MAX_COEF) ? StWotsHash : StWotsPkStore;
+                    end
                 end
 
                 StWotsHash: begin
@@ -536,7 +555,17 @@ module hss_verify
                     // (nodes above might use leaf_index but with bit[h]=0)
                     node_index_d = (32'd1 << TREE_H) | license.leaf_index[layer_q];
 
-                    mrkl_d = StMrklHash;
+                    mrkl_d = StMrklLoad;
+                end
+
+                StMrklLoad: begin
+                    // Stall until this level's sibling arrives. Unlike a WOTS
+                    // chain value it must stay stable for the whole two-block
+                    // hash, so it is latched into aux_reg rather than consumed
+                    // combinationally.
+                    if (sig_valid) begin
+                        mrkl_d = StMrklHash;
+                    end
                 end
 
                 StMrklHash: begin
@@ -547,7 +576,7 @@ module hss_verify
                         // or clear counter and node index
                         mrkl_level_d = ~last_level ? mrkl_level_q+1 : '0;
                         node_index_d = ~last_level ? parent_num     : '0;
-                        mrkl_d = ~last_level ? StMrklHash : StMrklInit;
+                        mrkl_d = ~last_level ? StMrklLoad : StMrklInit;
 
                         // signal completion to main FSM on last level
                         mrkl_complete = last_level;

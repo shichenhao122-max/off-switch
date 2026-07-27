@@ -29,12 +29,27 @@ module tb (
     logic             saved_verif_passed = 1'b0;
     license_t         dut_license;
 
+    // License element stream
+    int  elem_idx = 0;
+    wire dut_sig_ready;
+    wire dut_sig_valid = (elem_idx < int'(TOTAL_ELEMS));
+    wire [WIDTH-1:0] dut_sig_data = license_elem_at(elem_idx);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)                              elem_idx <= 0;
+        else if (phase == PH_INIT)               elem_idx <= 0;
+        else if (dut_sig_valid && dut_sig_ready) elem_idx <= elem_idx + 1;
+    end
+
     hss_verify u_dut (
-        .clk          (clk),
-        .rst_n        (rst_n),
-        .valid        (dut_valid),
-        .message      (MESSAGE),
-        .license      (dut_license),
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .valid           (dut_valid),
+        .message         (MESSAGE),
+        .license         (dut_license),
+        .sig_valid       (dut_sig_valid),
+        .sig_ready       (dut_sig_ready),
+        .sig_data        (dut_sig_data),
         .identifier   (hss_pkg::PUBKEYS[0].identifier),
         .root_pub_key (hss_pkg::PUBKEYS[0].root_pub_key),
         .ready        (dut_ready),

@@ -11,6 +11,9 @@
 //   3. Submit a license via valid-ready handshake: assert license_valid with
 //      license; transfer completes when license_ready is high.
 //      The signature must be over the current nonce as the message hash.
+//      For CRYPTO_TYPE=1 the WOTS+ chains and auth path are not in the
+//      license word; supply them on hss_sig_valid/ready/data while
+//      license_valid is held.
 //   4. On valid license: allowance += ALLOWANCE_INCREMENT (saturating), new nonce
 //      On invalid license: same nonce retained, can retry
 //   5. Workload (signed 8-bit add) is gated: result is zeroed when allowance == 0
@@ -50,6 +53,12 @@ module security_block
     output logic                  license_ready,
     input  logic [LICENSE_W-1:0]  license,
     output logic                  license_passed,
+
+    // HSS-LMS license element stream. Inputs are defaulted so that non-HSS
+    // builds need not drive them (IEEE 1800-2017 23.2.2.4).
+    input  logic                           hss_sig_valid = 1'b0,
+    output logic                           hss_sig_ready,
+    input  logic [WIDTH-1:0]               hss_sig_data  = '0,
 
     input  logic                           slh_sig_valid,
     output logic                           slh_sig_ready,
@@ -142,6 +151,7 @@ module security_block
 
     generate
         if (CRYPTO_TYPE == 0) begin : g_ecdsa
+            assign hss_sig_ready = 1'b0 & ^{hss_sig_valid, hss_sig_data};
             assign slh_sig_ready_internal = 1'b0 & ^{
                 slh_sig_valid, slh_sig_data, slh_sig_keep, slh_sig_last
             };
@@ -170,17 +180,21 @@ module security_block
             assign hss_license = license;
 
             hss_verify u_hss (
-                .clk          (clk),
-                .rst_n        (rst_n),
-                .valid        (crypto_valid),
-                .message      (trng_nonce),
-                .license      (hss_license),
+                .clk             (clk),
+                .rst_n           (rst_n),
+                .valid           (crypto_valid),
+                .message         (trng_nonce),
+                .license         (hss_license),
+                .sig_valid       (hss_sig_valid),
+                .sig_ready       (hss_sig_ready),
+                .sig_data        (hss_sig_data),
                 .identifier   (hss_pkg::PUBKEYS[signer_q].identifier),
                 .root_pub_key (hss_pkg::PUBKEYS[signer_q].root_pub_key),
                 .ready        (crypto_ready),
                 .verif_passed (crypto_verif_passed)
             );
         end else begin : g_slh_dsa
+            assign hss_sig_ready = 1'b0 & ^{hss_sig_valid, hss_sig_data};
             initial begin
                 if (CRYPTO_TYPE != 2) begin
                     $error("Unsupported CRYPTO_TYPE");

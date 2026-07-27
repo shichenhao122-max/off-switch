@@ -158,7 +158,7 @@ package tb_hss_sign_pkg;
         input  int signer_id,
         input  int lv,
         input  int leaf_q,
-        output logic [TREE_H_MAX-1:0][WIDTH-1:0] path
+        output logic [TREE_H-1:0][WIDTH-1:0] path
     );
         int node_idx;
         node_idx = NUM_LEAVES + leaf_q;
@@ -166,8 +166,6 @@ package tb_hss_sign_pkg;
             path[level] = TREE[signer_id][lv][node_idx ^ 1];
             node_idx = node_idx >> 1;
         end
-        for (int level = TREE_H; level < TREE_H_MAX; level++)
-            path[level] = '0;
     endfunction
 
     // -------------------------------------------------------------------------
@@ -177,6 +175,34 @@ package tb_hss_sign_pkg;
     // -------------------------------------------------------------------------
 
     int cur_leaf [NUM_SIGNERS][HSS_LEVELS];
+
+    // WOTS+ chain signatures now travel on a stream instead of inside
+    // license_t. The signer parks them here; the testbench feeds them out in
+    // the verifier's consumption order (layer HSS_LEVELS-1 down to 0).
+    logic [WIDTH-1:0] sig_chain_store [NUM_SIGNERS][HSS_LEVELS][WOTS_P];
+    logic [TREE_H-1:0][WIDTH-1:0] auth_store [NUM_SIGNERS][HSS_LEVELS];
+
+    // Which signer's material the stream currently replays. hss_sign() sets it
+    // automatically; a replay test that does not re-sign selects it explicitly.
+    int stream_signer = 0;
+    function automatic void stream_from_signer(input int s);
+        stream_signer = s;
+    endfunction
+
+    // License element stream layout: per layer (from HSS_LEVELS-1 down to 0),
+    // WOTS_P chain signatures followed by TREE_H auth path siblings.
+    localparam int unsigned ELEMS_PER_LAYER = WOTS_P + TREE_H;
+    localparam int unsigned TOTAL_ELEMS     = HSS_LEVELS * ELEMS_PER_LAYER;
+
+    function automatic logic [WIDTH-1:0] license_elem_at(input int flat);
+        int lv, off;
+        lv  = int'(HSS_LEVELS) - 1 - (flat / int'(ELEMS_PER_LAYER));
+        off = flat % int'(ELEMS_PER_LAYER);
+        if (lv < 0 || lv >= int'(HSS_LEVELS)) return '0;
+        return (off < int'(WOTS_P))
+               ? sig_chain_store[stream_signer][lv][off]
+               : auth_store[stream_signer][lv][off - int'(WOTS_P)];
+    endfunction
 
     function automatic void init_leaves();
         for (int s = 0; s < int'(NUM_SIGNERS); s++) begin
@@ -238,14 +264,14 @@ package tb_hss_sign_pkg;
             val = wots_secret_key(ident, seed, q, i);
             for (int j = 0; j < digits[i]; j++)
                 val = wots_chain_hash(ident, q, i, j, val);
-            lic.sig_chains[lv][i] = val;
+            sig_chain_store[signer_id][lv][i] = val;
         end
 
         lic.leaf_index[lv] = q;
         lic.randomizer[lv] = make_randomizer(q);
 
         // Auth path
-        get_auth_path(signer_id, lv, q, lic.auth_path[lv]);
+        get_auth_path(signer_id, lv, q, auth_store[signer_id][lv]);
     endfunction
 
     // -------------------------------------------------------------------------
@@ -266,6 +292,8 @@ package tb_hss_sign_pkg;
         license_t lic;
         logic [255:0] q_hash;
         int q;
+
+        stream_signer = signer_id;
 
         // One-shot initialisation on first sign across all signers.
         if (!leaves_initialised) begin

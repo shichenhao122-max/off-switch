@@ -52,7 +52,6 @@ package hss_pkg;
     //       But implementation fixes it for simplicity.
     localparam int unsigned    TREE_H      = 5;
     localparam lms_algorithm_t LMS_TYPE    = LMS_SHA256_N32_H5;    // LMS algorithm identifier
-    localparam int unsigned    TREE_H_MAX  = 25;                   // max of lms_algorithm_type
 
     // Note: HSS levels could vary per signer according to the standard.
     //       But implementation fixes it for simplicity.
@@ -114,13 +113,13 @@ package hss_pkg;
     // -------------------------------------------------------------------------
 
     typedef struct packed {
-        // Per-layer OTS + Merkle material. lv=0 is the top tree; lv=HSS_LEVELS-1
-        // is the leaf tree that signs the user message.
+        // Per-layer metadata only. lv=0 is the top tree; lv=HSS_LEVELS-1 is
+        // the leaf tree that signs the user message. The bulky material (WOTS+
+        // sig chains and Merkle auth path) is not part of this struct; it
+        // arrives on the hss_verify 256-bit element stream instead.
         //    Dimension 3     Dimension 2     Dimension 1
         logic [HSS_LEVELS-1:0]                [31:0]       leaf_index;
         logic [HSS_LEVELS-1:0]                [WIDTH-1:0]  randomizer;
-        logic [HSS_LEVELS-1:0][WOTS_P-1:0]    [WIDTH-1:0]  sig_chains;
-        logic [HSS_LEVELS-1:0][TREE_H_MAX-1:0][WIDTH-1:0]  auth_path;
         // Subtree identifiers. sub_I[0] is unused
         // (the top tree uses TOP_IDENTIFIER)
         logic [HSS_LEVELS-1:0]                [127:0]      sub_I;

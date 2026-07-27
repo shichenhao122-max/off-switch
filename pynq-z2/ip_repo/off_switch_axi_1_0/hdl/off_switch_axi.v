@@ -58,6 +58,7 @@ module off_switch_axi #
     wire         enabled;
     wire [7:0]   unused_workload_result;
     wire         unused_result_valid;
+    wire         unused_hss_sig_ready;
 
     generate
         if (CRYPTO_TYPE == 0) begin : g_ecdsa_license
@@ -130,6 +131,9 @@ module off_switch_axi #
         .license_ready   (license_ready),
         .license         (security_license),
         .license_passed  (license_passed),
+        .hss_sig_valid   (1'b0),            // HSS license stream unused on this board
+        .hss_sig_ready   (unused_hss_sig_ready),
+        .hss_sig_data    (256'b0),
         .slh_sig_valid   (slh_sig_valid),
         .slh_sig_ready   (slh_sig_ready),
         .slh_sig_data    (slh_sig_data),
@@ -149,7 +153,7 @@ module off_switch_axi #
     );
 
     assign led = enabled | (1'b0 & ^{
-        unused_workload_result, unused_result_valid
+        unused_workload_result, unused_result_valid, unused_hss_sig_ready
     });
 
 endmodule

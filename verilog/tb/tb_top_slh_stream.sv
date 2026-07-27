@@ -51,6 +51,7 @@ module tb (
         .license_valid,
         .license_ready,
         .license         (1'b0),
+        .hss_sig_ready  (),          // HSS license stream unused here
         .license_passed,
         .slh_sig_valid,
         .slh_sig_ready,
