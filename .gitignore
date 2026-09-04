@@ -19,3 +19,6 @@ docs/architecture.pdf
 docs/architecture.synctex.gz
 docs/architecture.toc
 docs/embedded_off_switch.pdf
+__pycache__/
+verilog/build/
+verilog/dump.fst

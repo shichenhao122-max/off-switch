@@ -1,0 +1,13 @@
+{
+  "parameter_set": "SLH-DSA-SHA2-128s",
+  "message": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "ctx": "",
+  "signer_index": 0,
+  "num_signers": 2,
+  "pk_seed": "9e28978d02fa18bf8edc50912b94820b",
+  "pk_root": "b3170cb691200f4da7255edaac482a67",
+  "expected_result": true,
+  "sig_bytes": 7856,
+  "beat_bytes": 16,
+  "beat_count": 491
+}
