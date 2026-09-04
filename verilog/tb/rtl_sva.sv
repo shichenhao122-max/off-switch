@@ -32,7 +32,15 @@ bind security_block security_block_sva u_sva (
     .publishing    (state_q == StPublishAndWait)
 );
 
+// Same contract for the SLH-DSA engine: completing a verification and asking
+// for another beat must never coincide.
 bind hss_verify hss_verify_sva u_sva (
+    .clk         (clk),
+    .ready       (ready),
+    .verify_done (verify_done)
+);
+
+bind hbsv_verify hss_verify_sva u_sva (
     .clk         (clk),
     .ready       (ready),
     .verify_done (verify_done)

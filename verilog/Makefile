@@ -112,9 +112,9 @@ help:
 	@echo ""
 	@echo "RTL Makefile — available targets"
 	@echo "────────────────────────────────────────────────────────"
-	@echo "  sim      Run simulation (TOOL=verilator TB=demo|top_ecdsa|top_hss|ecdsa|arith|hss GUI=0|1)"
+	@echo "  sim      Run simulation (TOOL=verilator TB=demo|top_ecdsa|top_hss|top_slh|ecdsa|arith|hss|slh_verify|slh_b2b GUI=0|1)"
 	@echo "  lint     Run linter (TOOL=verilator|verible GUI=0)"
-	@echo "  synth    Run yosys synthesis and report cell area (CRYPTO_TYPE=0|1). Requires CELL_LIB env var."
+	@echo "  synth    Run yosys synthesis and report cell area (CRYPTO_TYPE=0|1|2). Requires CELL_LIB env var."
 	@echo "  clean    Remove all generated build artefacts"
 	@echo "  help     Print this message"
 
