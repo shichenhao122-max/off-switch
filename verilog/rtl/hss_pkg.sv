@@ -52,7 +52,9 @@ package hss_pkg;
     //       But implementation fixes it for simplicity.
     localparam int unsigned    TREE_H      = 5;
     localparam lms_algorithm_t LMS_TYPE    = LMS_SHA256_N32_H5;    // LMS algorithm identifier
+    /* verilator lint_off UNUSEDPARAM */
     localparam int unsigned    TREE_H_MAX  = 25;                   // max of lms_algorithm_type
+    /* verilator lint_on UNUSEDPARAM */
 
     // Note: HSS levels could vary per signer according to the standard.
     //       But implementation fixes it for simplicity.
@@ -100,6 +102,8 @@ package hss_pkg;
     // Derived parameters
     // -------------------------------------------------------------------------
 
+    // Derived values kept for the LMS testbenches and documentation
+    /* verilator lint_off UNUSEDPARAM */
     // layer counter width
     localparam int unsigned LAYER_CNT_W = (HSS_LEVELS>1) ? $clog2(HSS_LEVELS) : 1;
 
@@ -108,6 +112,7 @@ package hss_pkg;
 
     // WOTS digit maximum value (all 1s)
     localparam logic [WOTS_W-1:0] WOTS_MAX_COEF = '1;
+    /* verilator lint_on UNUSEDPARAM */
 
     // -------------------------------------------------------------------------
     // HSS-LMS license format
@@ -124,6 +129,56 @@ package hss_pkg;
     // Nothing is buffered up front: each beat is consumed where it is needed,
     // so the verifier only holds the current layer's identity. The full struct
     // lives with the signer in tb/tb_hss_sign_pkg.sv.
+    /* verilator lint_off UNUSEDPARAM */
     localparam int unsigned LAYER_HDR_BEATS = 2;
+    /* verilator lint_on UNUSEDPARAM */
+
+    // -------------------------------------------------------------------------
+    // Hash-message layouts (RFC 8554 field order, first byte in the MSBs).
+    // Consumed by hbsv_schs_pkg; every message is I || q || ... so the
+    // 22-byte prefix is shared.
+    // -------------------------------------------------------------------------
+
+    typedef struct packed {
+        logic [IDENT_W-1:0] i;
+        logic [31:0]        q;
+        logic [15:0]        d;      // D_MESG / D_PBLC / D_LEAF
+    } lms_prefix_t;                                             // 176 b
+
+    typedef struct packed {          // Q, message layer: prefix || C || message
+        lms_prefix_t      pre;
+        logic [WIDTH-1:0] c;
+        logic [WIDTH-1:0] msg;
+    } lms_q_msg_t;                                              // 688 b
+
+    typedef struct packed {          // Q, upper layers: prefix || C || serialised pubkey below
+        lms_prefix_t        pre;
+        logic [WIDTH-1:0]   c;
+        logic [31:0]        lms_type;
+        logic [31:0]        lmots_type;
+        logic [IDENT_W-1:0] sub_i;
+        logic [WIDTH-1:0]   root;
+    } lms_q_sub_msg_t;                                          // 880 b
+
+    typedef struct packed {          // WOTS chain step: I || q || u16(i) || u8(j) || tmp
+        logic [IDENT_W-1:0] i;
+        logic [31:0]        q;
+        logic [15:0]        chain;
+        logic [7:0]         step;
+        logic [WIDTH-1:0]   tmp;
+    } lms_chain_msg_t;                                          // 440 b
+
+    typedef struct packed {          // leaf: I || q || D_LEAF || Kc
+        lms_prefix_t      pre;
+        logic [WIDTH-1:0] kc;
+    } lms_leaf_msg_t;                                           // 432 b
+
+    typedef struct packed {          // interior node: I || u32(node) || D_INTR || left || right
+        logic [IDENT_W-1:0] i;
+        logic [31:0]        node;
+        logic [15:0]        d;
+        logic [WIDTH-1:0]   left;
+        logic [WIDTH-1:0]   right;
+    } lms_intr_msg_t;                                           // 688 b
 
 endpackage
