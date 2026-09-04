@@ -181,6 +181,9 @@ module hss_verify
         .restore (sha_restore),
         .ctx     (kc_state_q),
         .ready   (sha_ready),
+        /* verilator lint_off PINCONNECTEMPTY */
+        .taken   (),
+        /* verilator lint_on PINCONNECTEMPTY */
         .digest  (sha_digest)
     );
 
