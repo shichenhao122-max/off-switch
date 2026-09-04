@@ -45,15 +45,18 @@ module tb (
         else if (dut_sig_valid && dut_sig_ready) beat_idx <= beat_idx + 1;
     end
 
-    hss_verify u_dut (
+    hbsv_verify #(
+        .SCH (hbsv_ctrl_pkg::SCHEME_LMS)
+    ) u_dut (
         .clk             (clk),
         .rst_n           (rst_n),
         .message         (MESSAGE),
         .valid           (dut_sig_valid),
         .ready           (dut_sig_ready),
         .data            (dut_sig_data),
-        .identifier   (hss_pkg::PUBKEYS[0].identifier),
-        .root_pub_key (hss_pkg::PUBKEYS[0].root_pub_key),
+        .key_ctx      (hss_pkg::PUBKEYS[0].identifier),
+        .root         (hss_pkg::PUBKEYS[0].root_pub_key),
+        .midstate     ('0),
         .verify_done  (dut_ready),
         .verif_passed (dut_verif_passed)
     );

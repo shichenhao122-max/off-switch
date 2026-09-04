@@ -159,15 +159,18 @@ module security_block
             );
         end else if (CRYPTO_TYPE == 1) begin : g_hss_lms
 
-            hss_verify u_hss (
+            hbsv_verify #(
+                .SCH (hbsv_ctrl_pkg::SCHEME_LMS)
+            ) u_hss (
                 .clk          (clk),
                 .rst_n        (rst_n),
                 .message      (trng_nonce),
+                .key_ctx      (hss_pkg::PUBKEYS[signer_q].identifier),
+                .root         (hss_pkg::PUBKEYS[signer_q].root_pub_key),
+                .midstate     ('0),
                 .valid        (crypto_valid),
                 .ready        (crypto_input_ready),
                 .data         (license_data),
-                .identifier   (hss_pkg::PUBKEYS[signer_q].identifier),
-                .root_pub_key (hss_pkg::PUBKEYS[signer_q].root_pub_key),
                 .verify_done  (crypto_done),
                 .verif_passed (crypto_verif_passed)
             );
