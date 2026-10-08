@@ -152,7 +152,7 @@ package hbsv_schs_pkg;
                                                  signand_w(SCHEME_SLH_128S));
 
     localparam int unsigned MESSAGE_W = arith_pkg::WIDTH;
-    localparam int unsigned SHA_DIGEST_W = sha2_wrap_pkg::DIGEST_W;
+    localparam int unsigned SHA_DIGEST_W = sha2_wrap_pkg::SHA256_DIGEST_W;
 
     // The builders take their arguments at the widest width and the whole
     // control bundle, and a scheme reads only its part of them, so -Wall
@@ -217,30 +217,6 @@ package hbsv_schs_pkg;
         return slh_pkg::slh_seed_block_t'{
                     seed:     slh_pkg::SLH_NW'(kctx),
                     zero_pad: '0};
-    endfunction
-
-    // -------------------------------------------------------------------------
-    // Layer header: the beat carrying the leaf index and the key context of
-    // the layer's tree
-    // -------------------------------------------------------------------------
-
-    typedef struct packed {
-        logic [LEAF_IDX_W-1:0] leaf_idx;
-        logic [MAX_KCTX_W-1:0] kctx;
-    } layer_hdr_t;
-
-    function automatic layer_hdr_t layer_hdr(
-        input sch_e                  sch,
-        input logic [MAX_DATA_W-1:0] beat);
-        hss_pkg::layer_hdr_t hss_hdr;
-        hss_hdr = beat;
-        case (sch)
-            SCHEME_HSS:      return layer_hdr_t'{
-                    leaf_idx: hss_hdr.leaf_index,
-                    kctx:     hss_hdr.sub_i};
-            SCHEME_SLH_128S: return '0;
-            default:         return '0;
-        endcase
     endfunction
 
     // -------------------------------------------------------------------------
@@ -449,17 +425,18 @@ package hbsv_schs_pkg;
     // Blocks of the first absorb, and the bits of its last block left for
     // elements
     function automatic int unsigned acc_first_blocks(input sch_e sch);
-        return ots_pk_prefix_bits(sch) / sha2_wrap_pkg::BLOCK_W + 1;
+        return ots_pk_prefix_bits(sch) / sha2_wrap_pkg::SHA256_BLOCK_W + 1;
     endfunction
     function automatic int unsigned acc_first_room(input sch_e sch);
-        return sha2_wrap_pkg::BLOCK_W - ots_pk_prefix_bits(sch) % sha2_wrap_pkg::BLOCK_W;
+        return sha2_wrap_pkg::SHA256_BLOCK_W
+             - ots_pk_prefix_bits(sch) % sha2_wrap_pkg::SHA256_BLOCK_W;
     endfunction
     // Elements banked before the first absorb, and before each later one
     function automatic int unsigned acc_first_full(input sch_e sch);
         return acc_first_room(sch) / digest_w(sch);
     endfunction
     function automatic int unsigned acc_mid_full(input sch_e sch);
-        return sha2_wrap_pkg::BLOCK_W / digest_w(sch) - 1;
+        return sha2_wrap_pkg::SHA256_BLOCK_W / digest_w(sch) - 1;
     endfunction
     // Bits of the element closing a block that fit in it, and the rest
     function automatic int unsigned acc_top_w(input sch_e sch);

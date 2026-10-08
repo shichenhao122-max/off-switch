@@ -89,7 +89,7 @@ package slh_pkg;
 
     // Every F, H and T_l message opens with PK.seed, zero-padded to a whole
     // SHA-256 block
-    localparam int unsigned SEED_PAD_W = sha2_wrap_pkg::BLOCK_W - SLH_NW;
+    localparam int unsigned SEED_PAD_W = sha2_wrap_pkg::SHA256_BLOCK_W - SLH_NW;
 
     typedef struct packed {
         logic [SLH_NW-1:0]     seed;
@@ -136,7 +136,7 @@ package slh_pkg;
     typedef struct packed {
         logic [SLH_NW-1:0]         r;
         logic [SLH_NW-1:0]         seed;
-        logic [sha2_wrap_pkg::DIGEST_W-1:0] inner_digest;
+        logic [sha2_wrap_pkg::SHA256_DIGEST_W-1:0] inner_digest;
         logic [MGF1_COUNTER_W-1:0] counter;
     } slh_mgf1_msg_t;
 
@@ -145,7 +145,7 @@ package slh_pkg;
     // output lies beyond the m bytes of the digest
     localparam int unsigned SLH_TREE_FIELD_W = 8 * ((SLH_IDX_TREE_W + 7) / 8);
     localparam int unsigned SLH_LEAF_FIELD_W = 8 * ((SLH_IDX_LEAF_W + 7) / 8);
-    localparam int unsigned SLH_BEYOND_M_W   = sha2_wrap_pkg::DIGEST_W - SLH_MD_W
+    localparam int unsigned SLH_BEYOND_M_W   = sha2_wrap_pkg::SHA256_DIGEST_W - SLH_MD_W
                                              - SLH_TREE_FIELD_W - SLH_LEAF_FIELD_W;
 
     typedef struct packed {

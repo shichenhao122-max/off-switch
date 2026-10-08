@@ -71,7 +71,7 @@ module hss_verify
 
     // License beat stream, in the field order of the standard signature
     // format (see hss_pkg). Per layer, from LAYERS-1 down to 0: a header
-    // beat carrying {leaf_index, sub_I}, the randomizer, OTS_LEN chain
+    // beat carrying {leaf_idx, sub_I}, the randomizer, OTS_LEN chain
     // signatures, then TREE_HT auth path siblings. Each beat is consumed where
     // it is needed, so only the current layer's identity is held.
     // SLH (see slh_pkg): the randomizer, the FORS elements, then per layer
@@ -106,7 +106,7 @@ module hss_verify
     localparam int unsigned FORS_H    = fors_h(SCH);    // FORS tree height
     localparam int unsigned SIGNAND_W = signand_w(SCH); // value signed by the chains / FORS
 
-    localparam bit LEAF_HASH     = has_mss_leaf_hash(SCH);  // Kc is hashed once more for the leaf
+    localparam bit MSS_LEAF_HASH = has_mss_leaf_hash(SCH);  // Kc is hashed once more for the leaf
     localparam bit SUB_PK_HASH   = has_sub_pk_hash(SCH);    // a root is hashed before it is signed
     localparam bit EXTEND_DIGEST = extends_digest(SCH);     // the message digest takes two hashes
 
@@ -115,10 +115,10 @@ module hss_verify
     // -------------------------------------------------------------------------
 
     typedef enum logic [3:0] {
-        StIdle, StQ, StMgf1, StFors, StForsFinal, StWots, StKcFinal, StMss, StDone
+        StIdle, StQ, StMgf1, StFors, StKcFinalFors, StWots, StKcFinalWots, StMss, StDone
     } seq_state_e;
 
-    // Header beats per layer: {leaf_index, sub_I} then the randomizer.
+    // Header beats per layer: {leaf_idx, sub_I} then the randomizer.
     // Without a header the key context is the public key's in every layer
     // and the randomizer is read straight off the stream.
     localparam int unsigned HDR_BEATS = hdr_beats(SCH);
@@ -132,7 +132,7 @@ module hss_verify
 
 
     typedef enum logic [1:0] {
-        StMrklInit, StMrklLeaf, StMrklHash, StMrklAccum
+        StMrklInit, StMrklLeaf, StMrklJoin, StMrklAccum
     } mrkl_state_e;
 
     // -------------------------------------------------------------------------
@@ -178,8 +178,18 @@ module hss_verify
     //
     // SLH: the leaf index comes off the message digest together with the
     // index of its tree; both move up a layer at a time.
-    logic [LEAF_IDX_W-1:0]  leaf_index_q, leaf_index_d;
-    logic [TREE_IDX_W-1:0]  tree_idx_q,   tree_idx_d;
+    // Both at the scheme's width: a leaf index is TREE_HT bits, the tree
+    // index the hypertree's remaining (LAYERS-1)*TREE_HT bits (HSS: unused);
+    // ctrl_t carries them zero-extended.
+    localparam int unsigned LEAF_W = TREE_HT;
+    localparam int unsigned TREE_W = (LAYERS - 1) * TREE_HT;
+    logic [LEAF_W-1:0]      leaf_idx_q,   leaf_idx_d;
+    logic [TREE_W-1:0]      tree_idx_q,   tree_idx_d;
+    // HSS: set when the header's q has bits above TREE_HT. It rides into
+    // the hashed q at bit TREE_HT, so Kc, and with it the root, can never
+    // match: RFC 8554 Alg. 6a step 2.i rejects such a q at parse time, here
+    // it fails the hash instead.
+    logic                   leaf_ovf_q,   leaf_ovf_d;
     logic [KCTX_W-1:0]      cur_I_q,      cur_I_d;
     logic [KCTX_W-1:0]      prev_I_q,     prev_I_d;
     logic [HDR_CNT_W-1:0]   hdr_cnt_q,    hdr_cnt_d;
@@ -270,9 +280,6 @@ module hss_verify
     wire [KCTX_W-1:0] cur_I = (is_pk_layer || !HAS_HDR) ? identifier
                                                         : cur_I_q;
 
-    // The FORS phase, in which the Merkle sub-FSM walks the FORS trees
-    wire in_fors = (seq_q == StFors);
-
     // Leaf revealed by the current FORS tree
     wire [FORS_LEAF_W-1:0] fors_leaf = fors_leaf_idx(.sch       (SCH),
                                                      .signand   (MAX_SIGNAND_W'(aux_reg_q)),
@@ -286,8 +293,8 @@ module hss_verify
                          chain_idx:  wots_chain_q,
                          hash_idx:   wots_step_q,
                          mrkl_level: mrkl_level_q,
-                         leaf_idx:   leaf_index_q,
-                         tree_idx:   tree_idx_q,
+                         leaf_idx:   LEAF_IDX_W'({leaf_ovf_q, leaf_idx_q}),
+                         tree_idx:   TREE_IDX_W'(tree_idx_q),
                          fors_tree:  fors_tree_q,
                          fors_leaf:  fors_leaf};
 
@@ -297,8 +304,8 @@ module hss_verify
 
     wire             last_chain    = (int'(wots_chain_q) == OTS_LEN-1) ? 1'b1 : 1'b0;
 
-    wire             last_level    = in_fors ? (int'(mrkl_level_q) == FORS_H-1)
-                                             : (int'(mrkl_level_q) == TREE_HT-1);
+    wire             last_level    = (seq_q == StFors)  ? (int'(mrkl_level_q) == FORS_H-1)
+                                                        : (int'(mrkl_level_q) == TREE_HT-1);
 
     wire             last_fors_tree = (int'(fors_tree_q) == FORS_K-1) ? 1'b1 : 1'b0;
 
@@ -447,19 +454,19 @@ module hss_verify
     // Absorbs (StWotsAccum, when the bank holds its quota) assemble the data
     // from the prefix or the carry, the banked endpoints and the top of the
     // endpoint still sitting in hash_reg; the rest of it becomes the next
-    // carry. StKcFinal then only absorbs the final block: the last carry,
+    // carry. StKcFinalWots then only absorbs the final block: the last carry,
     // whatever is still banked, and padding.
     //
     // The FORS public key is accumulated over the FORS roots the same way,
-    // by StMrklAccum and StForsFinal.
+    // by StMrklAccum and StKcFinalFors.
     // -------------------------------------------------------------------------
 
     localparam int unsigned KC_OTS_W  = KC_PREFIX_W + OTS_LEN*DW;
     localparam int unsigned KC_FORS_W = KC_PREFIX_W + FORS_K*DW;
 
-    wire kc_final     = (seq_q == StKcFinal) || (seq_q == StForsFinal);
+    wire kc_final     = (seq_q == StKcFinalWots) || (seq_q == StKcFinalFors);
     wire kc_accum     = ((seq_q == StWots) && (wots_q == StWotsAccum))
-                     || (in_fors           && (mrkl_q == StMrklAccum));
+                     || ((seq_q == StFors) && (mrkl_q == StMrklAccum));
 
     // The endpoint in hash_reg closes a block when the bank holds its quota
     wire kc_closes    = (int'(kc_pos_q) == (kc_first_q ? int'(KC_FIRST) : int'(KC_MID)));
@@ -474,15 +481,16 @@ module hss_verify
     wire kc_done  = !kc_closes || kc_saved;
 
     wire [KC_PREFIX_W-1:0] kc_prefix =
-            in_fors ? KC_PREFIX_W'(fors_pk_prefix(.sch  (SCH),
-                                                  .kctx (cur_I),
-                                                  .ctrl (ctrl)))
-                    : KC_PREFIX_W'(ots_pk_prefix(.sch  (SCH),
-                                                 .kctx (cur_I),
-                                                 .ctrl (ctrl)));
+            (seq_q == StWots) ? KC_PREFIX_W'(ots_pk_prefix( .sch  (SCH),
+                                                            .kctx (cur_I),
+                                                            .ctrl (ctrl)))
+                              : KC_PREFIX_W'(fors_pk_prefix(.sch  (SCH),
+                                                            .kctx (cur_I),
+                                                            .ctrl (ctrl)));
 
     // First absorb: the prefix, the first banked endpoints and the top of
     // the closing one. Later ones: the carry, the bank and the next top.
+    // Note: KC_MID is the size of kc_bank, but we only use KC_FIRST elements from it here
     wire [KC_FIRST_BLOCKS*512-1:0] kc_first_data =
             {kc_prefix, kc_bank_q[KC_MID-1 -: KC_FIRST], hash_reg_q[DW-1 -: KC_TOP_W]};
     wire [511:0]                   kc_mid_block  =
@@ -578,18 +586,18 @@ module hss_verify
     // Merkle helpers
     // -------------------------------------------------------------------------
 
-    wire mrkl_active  = (seq_q == StMss) || in_fors;
-    wire mrkl_hashing = mrkl_active && (mrkl_q == StMrklHash);
-
     // The sibling, and the secret element of a FORS leaf, are read straight
     // off the stream: the hash is only offered to the core while the beat is
     // present, and the beat is released (ready) with the hash's completion,
     // so valid and block stay stable until ready.
-    wire mrkl_wants = (mrkl_hashing || (in_fors && (mrkl_q == StMrklLeaf))) && hash_complete;
+    wire data_mss_wants = (mrkl_q == StMrklJoin) ||
+                          ((seq_q == StFors) && (mrkl_q == StMrklLeaf));
+    wire data_mss_ready = data_mss_wants && hash_complete;
 
     // Leaf the walk starts from: this layer's leaf in its tree, or the
     // revealed leaf in a FORS tree
-    wire [LEAF_IDX_W-1:0] mrkl_leaf_idx = in_fors ? LEAF_IDX_W'(fors_leaf) : leaf_index_q;
+    wire [LEAF_IDX_W-1:0] mrkl_leaf_idx = (seq_q == StFors) ? LEAF_IDX_W'(fors_leaf)
+                                                            : LEAF_IDX_W'(leaf_idx_q);
 
     // Nodes are indexed as 2n (left) and 2n+1 (right) from their parent.
     // The leaf is node 2^h + q and each level up halves the node number, so
@@ -723,7 +731,7 @@ module hss_verify
                         num_blocks = FORS_LEAF_BLOCKS;
                         {sha_block, fors_leaf_discard} = {fors_leaf_padded, 512'b0} << blk_shift;
                     end
-                    StMrklHash: begin
+                    StMrklJoin: begin
                         num_blocks = FORS_BLOCKS;
                         {sha_block, fors_discard} = {fors_padded, 512'b0} << blk_shift;
                     end
@@ -734,7 +742,7 @@ module hss_verify
                     default: ;
                 endcase
             end
-            StForsFinal: begin
+            StKcFinalFors: begin
                 num_blocks = 1;
                 sha_block  = kc_final_fors;
             end
@@ -747,7 +755,7 @@ module hss_verify
                     {sha_block, wots_discard} = {wots_padded, 512'b0} << blk_shift;
                 end
             end
-            StKcFinal: begin
+            StKcFinalWots: begin
                 num_blocks = 1;
                 sha_block  = kc_final_ots;
             end
@@ -773,14 +781,27 @@ module hss_verify
     // when the last hash that reads it completes.
     wire use_randomizer = !HAS_HDR && ((seq_q == StQ) || (seq_q == StMgf1));
 
-    wire hdr_wants  = (seq_q == StQ) && (hdr_cnt_q != HDR_DONE);
-    wire wots_wants = (seq_q == StWots) && (wots_q == StWotsLoad);
-    wire wots_loading = wots_wants && valid;
-    wire rand_wants = use_randomizer && hash_complete && ((seq_q == StMgf1) || !EXTEND_DIGEST);
-    wire wants_data = hdr_wants || wots_wants || rand_wants || mrkl_wants;
+    // The layer header beat as HSS lays it out; not generalized, SLH has no header
+    /* verilator lint_off UNUSEDSIGNAL */  // padding
+    wire hss_pkg::layer_hdr_t hss_hdr = hss_pkg::layer_hdr_t'(data);
+    /* verilator lint_on UNUSEDSIGNAL */
+
+    wire data_hdr_wants    = (seq_q == StQ) && (hdr_cnt_q != HDR_DONE);
+    wire data_hdr_ready    = data_hdr_wants; // consumed immediately, unconditionally
+    wire data_wots_wants   = (seq_q == StWots) && (wots_q == StWotsLoad);
+    wire data_wots_ready   = data_wots_wants; // consumed immediately, unconditionally
+    wire data_rand_wants   = use_randomizer && ((seq_q == StMgf1) || !EXTEND_DIGEST);
+    wire data_rand_ready   = data_rand_wants && hash_complete;
+
+    assign ready =  valid && (data_hdr_ready  ||
+                              data_wots_ready ||
+                              data_rand_ready ||
+                              data_mss_ready);
+
+    wire wots_loading = data_wots_wants && valid;
 
     // Qualified by valid so ready is never asserted on its own.
-    assign ready = valid && wants_data;
+
     wire hash_reg_en  = wots_loading | hash_complete;
 
     // Nodes are the leftmost DW bits of a digest
@@ -973,45 +994,42 @@ module hss_verify
         mrkl_d          = mrkl_q;
 
         mrkl_level_d    = mrkl_level_q;
-        fors_tree_d     = fors_tree_q;
 
         mrkl_sha_valid  = 1'b0;
         mrkl_complete   = 1'b0;
 
         // Only activate when main FSM is in Mss or Fors state
-        if (mrkl_active) begin
+        if ((seq_q == StMss) || (seq_q == StFors)) begin
 
             unique case (mrkl_q)
                 StMrklInit: begin
-                    // A FORS leaf is always hashed, from its secret element;
-                    // the leaf of a layer's tree is hashed from the OTS
-                    // public key or is that key itself.
-                    mrkl_d = (in_fors || LEAF_HASH) ? StMrklLeaf : StMrklHash;
+                    // Hash the MSS tree leaf first if needed, FORS leaf is always hashed first
+                    mrkl_d = (MSS_LEAF_HASH || (seq_q == StFors)) ? StMrklLeaf : StMrklJoin;
                 end
 
                 StMrklLeaf: begin
                     // Start the leaf hash and wait to complete. A FORS leaf
                     // is hashed straight off the bus, like a sibling.
-                    mrkl_sha_valid = in_fors ? valid : 1'b1;
+                    mrkl_sha_valid = (seq_q == StFors) ? valid : 1'b1;
                     if (hash_complete) begin
-                        mrkl_d = StMrklHash;
+                        mrkl_d = StMrklJoin;
                     end
                 end
 
-                StMrklHash: begin
+                StMrklJoin: begin
                     // Hash with the sibling straight off the bus: the core is
                     // fed only while the beat is present, and the beat is
                     // released with the hash's completion.
                     mrkl_sha_valid = valid;
                     if (hash_complete) begin
-                        // Increment level count or clear it
-                        mrkl_level_d = ~last_level ? mrkl_level_q+1 : '0;
-                        // A FORS root is folded into the FORS public key
-                        mrkl_d = ~last_level ? StMrklHash  :
-                                 in_fors     ? StMrklAccum : StMrklInit;
-
-                        // signal completion to main FSM on last level
-                        mrkl_complete = last_level && !in_fors;
+                        // Continue joining if not the last level,
+                        // otherwise move on:
+                        // complete for MSS
+                        // accum for FORS
+                        mrkl_level_d  = ~last_level ? mrkl_level_q+1 : '0;
+                        mrkl_d        = ~last_level        ? StMrklJoin  :
+                                        (seq_q != StFors)  ? StMrklInit  : StMrklAccum;
+                        mrkl_complete = (mrkl_d == StMrklInit);
                     end
                 end
 
@@ -1024,11 +1042,8 @@ module hss_verify
                         mrkl_sha_valid = 1'b1;
                     end
                     if (kc_done) begin
-                        fors_tree_d = ~last_fors_tree ? fors_tree_q+1 : '0;
-                        mrkl_d      = StMrklInit;
-
-                        // signal completion to main FSM on last tree
-                        mrkl_complete = last_fors_tree;
+                        mrkl_d        = StMrklInit;
+                        mrkl_complete = 1'b1;
                     end
                 end
 
@@ -1044,7 +1059,9 @@ module hss_verify
     always_comb begin
         seq_d         = seq_q;
         layer_d       = layer_q;
-        leaf_index_d  = leaf_index_q;
+        leaf_idx_d    = leaf_idx_q;
+        leaf_ovf_d    = leaf_ovf_q;
+        fors_tree_d   = fors_tree_q;
         tree_idx_d    = tree_idx_q;
         cur_I_d       = cur_I_q;
         prev_I_d      = prev_I_q;
@@ -1057,7 +1074,7 @@ module hss_verify
 
             StIdle: begin
                 // The first beat offered starts the verification; it is not
-                // consumed here (wants_data is low), so the producer holds it
+                // consumed here, so the producer holds it
                 // until StQ takes it.
                 if (valid) begin
                     // Start at the bottom layer (signs the user message)
@@ -1073,7 +1090,7 @@ module hss_verify
 
             StQ: begin
                 // Take this layer's header off the stream first: beat 0 is
-                // {leaf_index, sub_I}, beat 1 the randomizer (latched into
+                // {leaf_idx, sub_I}, beat 1 the randomizer (latched into
                 // aux_reg outside this block). Hashing starts once both are in.
                 if (hdr_cnt_q != HDR_DONE) begin
                     if (valid) begin
@@ -1081,8 +1098,9 @@ module hss_verify
                             // Keep the identifier this layer used: the layer
                             // above signs our public key and needs it.
                             prev_I_d     = cur_I_q;
-                            {leaf_index_d, cur_I_d} = layer_hdr(.sch  (SCH),
-                                                                .beat (MAX_DATA_W'(data)));
+                            cur_I_d      = hss_hdr.sub_i;
+                            leaf_idx_d   = LEAF_W'(hss_hdr.leaf_index);
+                            leaf_ovf_d   = |(hss_hdr.leaf_index >> LEAF_W);
                         end
                         hdr_cnt_d = hdr_cnt_q + 1'b1;
                     end
@@ -1103,7 +1121,8 @@ module hss_verify
                 // block) and the tree and leaf that sign it.
                 sha_valid = use_randomizer ? valid : 1'b1;
                 if (hash_complete) begin
-                    {tree_idx_d, leaf_index_d} = {msg_digest.tree_idx, msg_digest.leaf_idx};
+                    tree_idx_d = TREE_W'(msg_digest.tree_idx);
+                    leaf_idx_d = LEAF_W'(msg_digest.leaf_idx);
                     seq_d = StFors;
                 end
             end
@@ -1112,11 +1131,12 @@ module hss_verify
                 // The FORS step has multiple iterations, delegate hash control to Merkle sub-FSM
                 sha_valid = mrkl_sha_valid;
                 if (mrkl_complete) begin
-                    seq_d = StForsFinal;
+                    fors_tree_d = ~last_fors_tree ? fors_tree_q+1 : '0;
+                    seq_d       = ~last_fors_tree ? StFors        : StKcFinalFors;
                 end
             end
 
-            StForsFinal: begin
+            StKcFinalFors: begin
                 // Start the FORS public key hash and wait to complete; the
                 // chains sign its digest.
                 sha_valid = 1'b1;
@@ -1129,11 +1149,11 @@ module hss_verify
                 // The WOTS step has multiple iterations, delegate hash control to WOTS sub-FSM
                 sha_valid = wots_sha_valid;
                 if (wots_complete) begin
-                    seq_d = StKcFinal;
+                    seq_d = StKcFinalWots;
                 end
             end
 
-            StKcFinal: begin
+            StKcFinalWots: begin
                 // Start Kc hash and wait to complete
                 sha_valid = 1'b1;
                 if (hash_complete) begin
@@ -1153,8 +1173,7 @@ module hss_verify
                     // and without that message there is no header to bring
                     // its leaf index: the index moves up a layer instead
                     if (!SUB_PK_HASH) begin
-                        {tree_idx_d, leaf_index_d} = {TREE_IDX_W'(tree_idx_q >> TREE_HT),
-                                                      LEAF_IDX_W'(tree_idx_q[TREE_HT-1:0])};
+                        {tree_idx_d, leaf_idx_d} = (LAYERS * TREE_HT)'(tree_idx_q);
                     end
                 end
             end
@@ -1175,7 +1194,8 @@ module hss_verify
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            leaf_index_q <= '0;
+            leaf_idx_q <= '0;
+            leaf_ovf_q <= 1'b0;
             tree_idx_q   <= '0;
             cur_I_q      <= '0;
             prev_I_q     <= '0;
@@ -1191,7 +1211,8 @@ module hss_verify
             fors_tree_q   <= '0;
             layer_q       <= '0;
         end else begin
-            leaf_index_q <= leaf_index_d;
+            leaf_idx_q <= leaf_idx_d;
+            leaf_ovf_q <= leaf_ovf_d;
             tree_idx_q   <= tree_idx_d;
             cur_I_q      <= cur_I_d;
             prev_I_q     <= prev_I_d;
