@@ -139,17 +139,32 @@ package hbsv_schs_pkg;
         endcase
     endfunction
 
-    // Widest of each across the schemes
+    // Widest across the schemes
     function automatic int unsigned max2(input int unsigned a, input int unsigned b);
         return (a > b) ? a : b;
     endfunction
+    function automatic int unsigned kctx_w_max();
+        kctx_w_max = 0;
+        for (int i = 0; i < SCHEME_MAX; i++) begin
+            kctx_w_max = max2(kctx_w_max, kctx_w(sch_e'(i)));
+        end
+    endfunction
+    function automatic int unsigned digest_w_max();
+        digest_w_max = 0;
+        for (int i = 0; i < SCHEME_MAX; i++) begin
+            digest_w_max = max2(digest_w_max, digest_w(sch_e'(i)));
+        end
+    endfunction
+    function automatic int unsigned signand_w_max();
+        signand_w_max = 0;
+        for (int i = 0; i < SCHEME_MAX; i++) begin
+            signand_w_max = max2(signand_w_max, signand_w(sch_e'(i)));
+        end
+    endfunction
 
-    localparam int unsigned MAX_KCTX_W    = max2(kctx_w(SCHEME_HSS),
-                                                 kctx_w(SCHEME_SLH_128S));
-    localparam int unsigned MAX_DATA_W    = max2(digest_w(SCHEME_HSS),
-                                                 digest_w(SCHEME_SLH_128S));
-    localparam int unsigned MAX_SIGNAND_W = max2(signand_w(SCHEME_HSS),
-                                                 signand_w(SCHEME_SLH_128S));
+    localparam int unsigned MAX_KCTX_W    = kctx_w_max();
+    localparam int unsigned MAX_DATA_W    = digest_w_max();
+    localparam int unsigned MAX_SIGNAND_W = signand_w_max();
 
     localparam int unsigned MESSAGE_W = arith_pkg::WIDTH;
     localparam int unsigned SHA_DIGEST_W = sha2_wrap_pkg::SHA256_DIGEST_W;
@@ -164,13 +179,13 @@ package hbsv_schs_pkg;
     // -------------------------------------------------------------------------
 
     // LMS: the u32 field is the leaf index q, or the parent node number
-    // during a Merkle step. Leaf q is node 2^h + q; each level up halves
-    // the node number.
+    // during a Merkle step. The leaf the walk starts from is node 2^h + q;
+    // each level up halves the node number.
     function automatic logic [hss_pkg::Q_W-1:0] ctrl2q(input ctrl_t ctrl);
         return ctrl.leaf_idx;
     endfunction
     function automatic logic [hss_pkg::Q_W-1:0] ctrl2node(input sch_e sch, input ctrl_t ctrl);
-        return ((hss_pkg::Q_W'(1) << tree_h(sch)) | ctrl.leaf_idx) >> ctrl.mrkl_level >> 1;
+        return ((hss_pkg::Q_W'(1) << tree_h(sch)) | ctrl.mrkl_leaf) >> ctrl.mrkl_level >> 1;
     endfunction
 
     // SLH: the compressed address of a hash. The layer address counts from
@@ -195,17 +210,18 @@ package hbsv_schs_pkg;
     endfunction
 
     // SLH: the nodes of a tree level are numbered from zero, so the parent's
-    // index is the leaf index halved once per level. The FORS trees share
-    // one numbering: the leaves of tree t follow those of tree t - 1.
+    // index is the index of the leaf the walk starts from, halved once per
+    // level. The FORS trees share one numbering: the leaves of tree t follow
+    // those of tree t - 1.
     function automatic logic [slh_pkg::ADRS_WORD_W-1:0] ctrl2height(input ctrl_t ctrl);
         return slh_pkg::ADRS_WORD_W'(ctrl.mrkl_level) + slh_pkg::ADRS_WORD_W'(1);
     endfunction
     function automatic logic [slh_pkg::ADRS_WORD_W-1:0] ctrl2tree_index(input ctrl_t ctrl);
-        return slh_pkg::ADRS_WORD_W'(ctrl.leaf_idx) >> ctrl.mrkl_level >> 1;
+        return slh_pkg::ADRS_WORD_W'(ctrl.mrkl_leaf) >> ctrl.mrkl_level >> 1;
     endfunction
     function automatic logic [slh_pkg::ADRS_WORD_W-1:0] ctrl2fors_leaf(input ctrl_t ctrl);
-        return (slh_pkg::ADRS_WORD_W'(ctrl.fors_tree) << slh_pkg::SLH_A)
-               | slh_pkg::ADRS_WORD_W'(ctrl.fors_leaf);
+        return (slh_pkg::ADRS_WORD_W'(ctrl.mrkl_tree) << slh_pkg::SLH_A)
+               | slh_pkg::ADRS_WORD_W'(ctrl.mrkl_leaf);
     endfunction
     function automatic logic [slh_pkg::ADRS_WORD_W-1:0] ctrl2fors_index(input ctrl_t ctrl);
         return ctrl2fors_leaf(ctrl) >> ctrl.mrkl_level >> 1;
@@ -231,8 +247,14 @@ package hbsv_schs_pkg;
         endcase
     endfunction
 
-    localparam int unsigned MAX_MSG_HASH_MSG_BITS = max2(msg_hash_msg_bits(SCHEME_HSS),
-                                                         msg_hash_msg_bits(SCHEME_SLH_128S));
+    function automatic int unsigned msg_hash_msg_bits_max();
+        msg_hash_msg_bits_max = 0;
+        for (int i = 0; i < SCHEME_MAX; i++) begin
+            msg_hash_msg_bits_max = max2(msg_hash_msg_bits_max, msg_hash_msg_bits(sch_e'(i)));
+        end
+    endfunction
+
+    localparam int unsigned MAX_MSG_HASH_MSG_BITS = msg_hash_msg_bits_max();
 
     function automatic logic [MAX_MSG_HASH_MSG_BITS-1:0] msg_hash_msg(
         input sch_e                  sch,
@@ -345,8 +367,14 @@ package hbsv_schs_pkg;
         endcase
     endfunction
 
-    localparam int unsigned MAX_OTS_CHAIN_MSG_BITS = max2(ots_chain_msg_bits(SCHEME_HSS),
-                                                          ots_chain_msg_bits(SCHEME_SLH_128S));
+    function automatic int unsigned ots_chain_msg_bits_max();
+        ots_chain_msg_bits_max = 0;
+        for (int i = 0; i < SCHEME_MAX; i++) begin
+            ots_chain_msg_bits_max = max2(ots_chain_msg_bits_max, ots_chain_msg_bits(sch_e'(i)));
+        end
+    endfunction
+
+    localparam int unsigned MAX_OTS_CHAIN_MSG_BITS = ots_chain_msg_bits_max();
 
     function automatic logic [MAX_OTS_CHAIN_MSG_BITS-1:0] ots_chain_msg(
         input sch_e                  sch,
@@ -385,8 +413,14 @@ package hbsv_schs_pkg;
         endcase
     endfunction
 
-    localparam int unsigned MAX_OTS_PK_PREFIX_BITS = max2(ots_pk_prefix_bits(SCHEME_HSS),
-                                                          ots_pk_prefix_bits(SCHEME_SLH_128S));
+    function automatic int unsigned ots_pk_prefix_bits_max();
+        ots_pk_prefix_bits_max = 0;
+        for (int i = 0; i < SCHEME_MAX; i++) begin
+            ots_pk_prefix_bits_max = max2(ots_pk_prefix_bits_max, ots_pk_prefix_bits(sch_e'(i)));
+        end
+    endfunction
+
+    localparam int unsigned MAX_OTS_PK_PREFIX_BITS = ots_pk_prefix_bits_max();
 
     function automatic logic [MAX_OTS_PK_PREFIX_BITS-1:0] ots_pk_prefix(
         input sch_e                  sch,
@@ -485,8 +519,14 @@ package hbsv_schs_pkg;
         endcase
     endfunction
 
-    localparam int unsigned MAX_MSS_JOIN_MSG_BITS = max2(mss_join_msg_bits(SCHEME_HSS),
-                                                         mss_join_msg_bits(SCHEME_SLH_128S));
+    function automatic int unsigned mss_join_msg_bits_max();
+        mss_join_msg_bits_max = 0;
+        for (int i = 0; i < SCHEME_MAX; i++) begin
+            mss_join_msg_bits_max = max2(mss_join_msg_bits_max, mss_join_msg_bits(sch_e'(i)));
+        end
+    endfunction
+
+    localparam int unsigned MAX_MSS_JOIN_MSG_BITS = mss_join_msg_bits_max();
 
     function automatic logic [MAX_MSS_JOIN_MSG_BITS-1:0] mss_join_msg(
         input sch_e                  sch,
@@ -521,20 +561,20 @@ package hbsv_schs_pkg;
     // (as wide as the OTS one, the accumulation is shared)
     // -------------------------------------------------------------------------
 
-    function automatic logic [FORS_LEAF_W-1:0] fors_leaf_idx(
+    function automatic logic [LEAF_IDX_W-1:0] fors_leaf_idx(
         input sch_e                     sch,
         input logic [MAX_SIGNAND_W-1:0] signand,
-        input logic [FORS_TREE_W-1:0]   fors_tree);
+        input logic [MRKL_TREE_W-1:0]   fors_tree);
         logic [slh_pkg::SLH_A-1:0] slh_digit;
         slh_digit = '0;
         for (int unsigned i = 0; i < slh_pkg::SLH_K; i++) begin
-            if (fors_tree == FORS_TREE_W'(i)) begin
+            if (fors_tree == MRKL_TREE_W'(i)) begin
                 slh_digit = signand[slh_pkg::SLH_MD_W-1 - slh_pkg::SLH_A*i -: slh_pkg::SLH_A];
             end
         end
         case (sch)
             SCHEME_HSS:      return '0;
-            SCHEME_SLH_128S: return FORS_LEAF_W'(slh_digit);
+            SCHEME_SLH_128S: return LEAF_IDX_W'(slh_digit);
             default:         return '0;
         endcase
     endfunction

@@ -212,9 +212,10 @@ module hss_verify
     logic [CHAIN_IDX_W-1:0] wots_chain_q, wots_chain_d; // chain index 0..OTS_LEN-1
     logic [HASH_IDX_W-1:0]  wots_step_q,  wots_step_d;  // step within chain
 
-    // Merkle tree level and FORS tree index (driven by Merkle sub-FSM)
+    // Merkle tree level (driven by Merkle sub-FSM) and FORS tree index
+    // (driven by the sequencer)
     logic [MRKL_LEVEL_W-1:0] mrkl_level_q, mrkl_level_d;
-    logic [FORS_TREE_W-1:0]  fors_tree_q,  fors_tree_d;
+    logic [MRKL_TREE_W-1:0]  fors_tree_q,  fors_tree_d;
 
     // Kc interleaved accumulation (replaces the former 34 x 256-bit pk store):
     // the banked endpoints, the current carry and the staged next carry (the
@@ -280,10 +281,13 @@ module hss_verify
     wire [KCTX_W-1:0] cur_I = (is_pk_layer || !HAS_HDR) ? identifier
                                                         : cur_I_q;
 
-    // Leaf revealed by the current FORS tree
-    wire [FORS_LEAF_W-1:0] fors_leaf = fors_leaf_idx(.sch       (SCH),
-                                                     .signand   (MAX_SIGNAND_W'(aux_reg_q)),
-                                                     .fors_tree (fors_tree_q));
+    // Leaf the Merkle walk starts from: the key pair's, or the one the
+    // current FORS tree reveals (its digit of the signand)
+    wire [LEAF_IDX_W-1:0] mrkl_leaf =
+            (seq_q == StFors) ? fors_leaf_idx(.sch       (SCH),
+                                              .signand   (MAX_SIGNAND_W'(aux_reg_q)),
+                                              .fors_tree (fors_tree_q))
+                              : LEAF_IDX_W'(leaf_idx_q);
 
     // -------------------------------------------------------------------------
     // Control bundle — the counters in the form the hash messages read them
@@ -295,8 +299,8 @@ module hss_verify
                          mrkl_level: mrkl_level_q,
                          leaf_idx:   LEAF_IDX_W'({leaf_ovf_q, leaf_idx_q}),
                          tree_idx:   TREE_IDX_W'(tree_idx_q),
-                         fors_tree:  fors_tree_q,
-                         fors_leaf:  fors_leaf};
+                         mrkl_tree:  fors_tree_q,
+                         mrkl_leaf:  mrkl_leaf};
 
     // -------------------------------------------------------------------------
     // Data indexed by WOTS chain / Merkle level
@@ -368,13 +372,12 @@ module hss_verify
     endfunction
 
     // -------------------------------------------------------------------------
-    // Q: H(I || q || D_MESG || C || <signed payload>)
+    // Q: the message hash
     //
-    // Message layer (is_msg_layer):   signed payload = user message (1 block)
-    // Upper layers:                   signed payload = serialised pub[lv+1]
-    //                                 = LMS_TYPE || LMOTS_TYPE || sub_I[lv+1] || T[1]
-    //                                 where T[1] lives in hash_reg_q (the root
-    //                                 just computed by the layer below)
+    // Message layer (is_msg_layer):   over the user message
+    // Upper layers:                   over the public key of the layer below,
+    //                                 its identifier (prev_I_q) and its root
+    //                                 (hash_reg_q, just computed)
     // -------------------------------------------------------------------------
 
     localparam int unsigned Q_MSG_W = msg_hash_msg_bits(SCH);
@@ -432,7 +435,7 @@ module hss_verify
                                                     .digest (sha_digest));
 
     // -------------------------------------------------------------------------
-    // WOTS chain: H(I || q || i || j || tmp)
+    // WOTS chain step
     // -------------------------------------------------------------------------
 
     localparam int unsigned WOTS_MSG_W = ots_chain_msg_bits(SCH);
@@ -449,7 +452,7 @@ module hss_verify
             {wots_data, 1'b1, {WOTS_PAD_ZEROS{1'b0}}, 64'($bits(wots_data))};
 
     // -------------------------------------------------------------------------
-    // Kc: H(I || q || D_PBLC || pk0..pk33), accumulated incrementally
+    // Kc: the OTS public-key hash, accumulated incrementally
     //
     // Absorbs (StWotsAccum, when the bank holds its quota) assemble the data
     // from the prefix or the carry, the banked endpoints and the top of the
@@ -549,21 +552,21 @@ module hss_verify
     assign sha_restore = kc_absorbing && !kc_first_q;
 
     // -------------------------------------------------------------------------
-    // Leaf: H(I || q || D_LEAF || Kc)
+    // MSS leaf: the hash over Kc
     // -------------------------------------------------------------------------
 
-    localparam int unsigned LEAF_MSG_W = MSS_LEAF_MSG_BITS;
+    localparam int unsigned MSS_LEAF_MSG_W = MSS_LEAF_MSG_BITS;
 
-    wire [LEAF_MSG_W-1:0] leaf_data = mss_leaf_msg(.sch  (SCH),
-                                                   .kctx (cur_I),
-                                                   .ctrl (ctrl),
-                                                   .kc   (MAX_DATA_W'(hash_reg_q)));
+    wire [MSS_LEAF_MSG_W-1:0] mss_leaf_data = mss_leaf_msg(.sch  (SCH),
+                                                           .kctx (cur_I),
+                                                           .ctrl (ctrl),
+                                                           .kc   (MAX_DATA_W'(hash_reg_q)));
 
-    localparam int unsigned LEAF_BLOCKS    = calc_sha_blocks($bits(leaf_data));
-    localparam int unsigned LEAF_PAD_ZEROS = calc_sha_pad_zeros($bits(leaf_data));
+    localparam int unsigned MSS_LEAF_BLOCKS    = calc_sha_blocks($bits(mss_leaf_data));
+    localparam int unsigned MSS_LEAF_PAD_ZEROS = calc_sha_pad_zeros($bits(mss_leaf_data));
 
-    wire [LEAF_BLOCKS*512-1:0] leaf_padded =
-            {leaf_data, 1'b1, {LEAF_PAD_ZEROS{1'b0}}, 64'($bits(leaf_data))};
+    wire [MSS_LEAF_BLOCKS*512-1:0] mss_leaf_padded =
+            {mss_leaf_data, 1'b1, {MSS_LEAF_PAD_ZEROS{1'b0}}, 64'($bits(mss_leaf_data))};
 
     // -------------------------------------------------------------------------
     // FORS leaf: hash of the secret element, which is the beat on the bus
@@ -594,16 +597,11 @@ module hss_verify
                           ((seq_q == StFors) && (mrkl_q == StMrklLeaf));
     wire data_mss_ready = data_mss_wants && hash_complete;
 
-    // Leaf the walk starts from: this layer's leaf in its tree, or the
-    // revealed leaf in a FORS tree
-    wire [LEAF_IDX_W-1:0] mrkl_leaf_idx = (seq_q == StFors) ? LEAF_IDX_W'(fors_leaf)
-                                                            : LEAF_IDX_W'(leaf_idx_q);
-
     // Nodes are indexed as 2n (left) and 2n+1 (right) from their parent.
     // The leaf is node 2^h + q and each level up halves the node number, so
     // the node at the current level is a right child iff that bit of q is
     // set; the node number itself is derived the same way in the package.
-    wire is_right = mrkl_leaf_idx[mrkl_level_q];
+    wire is_right = mrkl_leaf[mrkl_level_q];
 
     // The sibling is the beat on the bus
     logic [DW-1:0] left_node;
@@ -613,40 +611,41 @@ module hss_verify
                                               : {hash_reg_q, data};
 
     // -------------------------------------------------------------------------
-    // Merkle: H(I || parent || D_INTR || left || right)
+    // MSS node: the parent hash over a left and a right child
     // -------------------------------------------------------------------------
 
-    localparam int unsigned MSS_MSG_W = mss_join_msg_bits(SCH);
+    localparam int unsigned MSS_JOIN_MSG_W = mss_join_msg_bits(SCH);
 
-    wire [MSS_MSG_W-1:0] mss_data = MSS_MSG_W'(mss_join_msg(.sch   (SCH),
-                                                            .kctx  (cur_I),
-                                                            .ctrl  (ctrl),
-                                                            .left  (MAX_DATA_W'(left_node)),
-                                                            .right (MAX_DATA_W'(right_node))));
+    wire [MSS_JOIN_MSG_W-1:0] mss_join_data =
+            MSS_JOIN_MSG_W'(mss_join_msg(.sch   (SCH),
+                                         .kctx  (cur_I),
+                                         .ctrl  (ctrl),
+                                         .left  (MAX_DATA_W'(left_node)),
+                                         .right (MAX_DATA_W'(right_node))));
 
-    localparam int unsigned MSS_BLOCKS    = calc_sha_blocks($bits(mss_data));
-    localparam int unsigned MSS_PAD_ZEROS = calc_sha_pad_zeros($bits(mss_data));
+    localparam int unsigned MSS_JOIN_BLOCKS    = calc_sha_blocks($bits(mss_join_data));
+    localparam int unsigned MSS_JOIN_PAD_ZEROS = calc_sha_pad_zeros($bits(mss_join_data));
 
-    wire [MSS_BLOCKS*512-1:0] mss_padded =
-            {mss_data, 1'b1, {MSS_PAD_ZEROS{1'b0}}, 64'($bits(mss_data))};
+    wire [MSS_JOIN_BLOCKS*512-1:0] mss_join_padded =
+            {mss_join_data, 1'b1, {MSS_JOIN_PAD_ZEROS{1'b0}}, 64'($bits(mss_join_data))};
 
     // -------------------------------------------------------------------------
     // FORS node: parent hash over a left and a right child of a FORS tree
     // -------------------------------------------------------------------------
 
-    localparam int unsigned FORS_MSG_W = FORS_JOIN_MSG_BITS;
+    localparam int unsigned FORS_JOIN_MSG_W = FORS_JOIN_MSG_BITS;
 
-    wire [FORS_MSG_W-1:0] fors_data = fors_join_msg(.sch   (SCH),
-                                                    .kctx  (cur_I),
-                                                    .ctrl  (ctrl),
-                                                    .left  (MAX_DATA_W'(left_node)),
-                                                    .right (MAX_DATA_W'(right_node)));
+    wire [FORS_JOIN_MSG_W-1:0] fors_join_data = fors_join_msg(.sch   (SCH),
+                                                              .kctx  (cur_I),
+                                                              .ctrl  (ctrl),
+                                                              .left  (MAX_DATA_W'(left_node)),
+                                                              .right (MAX_DATA_W'(right_node)));
 
-    localparam int unsigned FORS_BLOCKS    = calc_sha_blocks($bits(fors_data));
-    localparam int unsigned FORS_PAD_ZEROS = calc_sha_pad_zeros($bits(fors_data));
+    localparam int unsigned FORS_JOIN_BLOCKS    = calc_sha_blocks($bits(fors_join_data));
+    localparam int unsigned FORS_JOIN_PAD_ZEROS = calc_sha_pad_zeros($bits(fors_join_data));
 
-    wire [FORS_BLOCKS*512-1:0] fors_padded =
-            {fors_data, 1'b1, {FORS_PAD_ZEROS{1'b0}}, 64'($bits(fors_data))};
+    wire [FORS_JOIN_BLOCKS*512-1:0] fors_join_padded =
+            {fors_join_data, 1'b1, {FORS_JOIN_PAD_ZEROS{1'b0}}, 64'($bits(fors_join_data))};
 
 
     // -------------------------------------------------------------------------
@@ -663,10 +662,10 @@ module hss_verify
     logic [$bits(q_sub_padded)-1:0]     q_sub_discard;
     logic [$bits(mgf1_padded)-1:0]      mgf1_discard;
     logic [$bits(wots_padded)-1:0]      wots_discard;
-    logic [$bits(leaf_padded)-1:0]      leaf_discard;
+    logic [$bits(mss_leaf_padded)-1:0]  mss_leaf_discard;
     logic [$bits(fors_leaf_padded)-1:0] fors_leaf_discard;
-    logic [$bits(mss_padded)-1:0]       mss_discard;
-    logic [$bits(fors_padded)-1:0]      fors_discard;
+    logic [$bits(mss_join_padded)-1:0]  mss_join_discard;
+    logic [$bits(fors_join_padded)-1:0] fors_join_discard;
     /* verilator lint_on UNUSEDSIGNAL */
 
     // Last block of the hash, or of the Kc absorb
@@ -705,10 +704,10 @@ module hss_verify
         q_sub_discard     = '0;
         mgf1_discard      = '0;
         wots_discard      = '0;
-        leaf_discard      = '0;
+        mss_leaf_discard  = '0;
         fors_leaf_discard = '0;
-        mss_discard       = '0;
-        fors_discard      = '0;
+        mss_join_discard  = '0;
+        fors_join_discard = '0;
 
         // Append 512'b0 for the shifts on the right side so widths are equal
         unique case (seq_q)
@@ -732,8 +731,8 @@ module hss_verify
                         {sha_block, fors_leaf_discard} = {fors_leaf_padded, 512'b0} << blk_shift;
                     end
                     StMrklJoin: begin
-                        num_blocks = FORS_BLOCKS;
-                        {sha_block, fors_discard} = {fors_padded, 512'b0} << blk_shift;
+                        num_blocks = FORS_JOIN_BLOCKS;
+                        {sha_block, fors_join_discard} = {fors_join_padded, 512'b0} << blk_shift;
                     end
                     StMrklAccum: begin
                         num_blocks = kc_absorb_blocks;
@@ -761,11 +760,11 @@ module hss_verify
             end
             StMss: begin
                 if (mrkl_q == StMrklLeaf) begin
-                    num_blocks = LEAF_BLOCKS;
-                    {sha_block, leaf_discard} = {leaf_padded, 512'b0} << blk_shift;
+                    num_blocks = MSS_LEAF_BLOCKS;
+                    {sha_block, mss_leaf_discard} = {mss_leaf_padded, 512'b0} << blk_shift;
                 end else begin
-                    num_blocks = MSS_BLOCKS;
-                    {sha_block, mss_discard} = {mss_padded, 512'b0} << blk_shift;
+                    num_blocks = MSS_JOIN_BLOCKS;
+                    {sha_block, mss_join_discard} = {mss_join_padded, 512'b0} << blk_shift;
                 end
             end
             default: ;
