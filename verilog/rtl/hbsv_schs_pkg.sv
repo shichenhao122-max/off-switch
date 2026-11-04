@@ -3,8 +3,10 @@
 // Everything hss_verify needs to know about a signature scheme is an
 // elaboration-time function of its SCH parameter: the scheme constants and,
 // per hash message, its width and the builder that turns the shared ctrl_t
-// bundle plus the live data values into the scheme's layout. The layout
-// structs themselves belong to the scheme packages (hss_pkg, slh_pkg).
+// bundle plus the live data values into the scheme's layout. A value the
+// counters do not hold at that step is a builder argument of its own, as
+// the key context is. The layout structs themselves belong to the scheme
+// packages (hss_pkg, slh_pkg).
 // Builders take their arguments and return the layout at the widest width
 // across schemes, right-aligned; the caller widens and narrows with width
 // casts. A message a scheme does not have is all zeroes.
@@ -178,11 +180,12 @@ package hbsv_schs_pkg;
     // ctrl_t -> scheme fields
     // -------------------------------------------------------------------------
 
-    // LMS: the u32 field is the leaf index q, or the parent node number
-    // during a Merkle step. The leaf the walk starts from is node 2^h + q;
-    // each level up halves the node number.
+    // LMS: the u32 field is the leaf index q of the key pair, which is the
+    // leaf the Merkle walk starts from, or the parent node number during a
+    // Merkle step. The leaf is node 2^h + q; each level up halves the node
+    // number.
     function automatic logic [hss_pkg::Q_W-1:0] ctrl2q(input ctrl_t ctrl);
-        return ctrl.leaf_idx;
+        return ctrl.mrkl_leaf;
     endfunction
     function automatic logic [hss_pkg::Q_W-1:0] ctrl2node(input sch_e sch, input ctrl_t ctrl);
         return ((hss_pkg::Q_W'(1) << tree_h(sch)) | ctrl.mrkl_leaf) >> ctrl.mrkl_level >> 1;
@@ -190,23 +193,29 @@ package hbsv_schs_pkg;
 
     // SLH: the compressed address of a hash. The layer address counts from
     // the bottom of the hypertree while ht_layer counts from the top; the
-    // key-pair address is the leaf index except in tree hashes; the last two
-    // words are the caller's, their meaning depends on the type.
+    // key pair address and the last two words are the caller's, their
+    // meaning depends on the type.
     function automatic slh_pkg::slh_adrs_c_t slh_adrs(
         input sch_e                            sch,
         input ctrl_t                           ctrl,
         input logic [slh_pkg::ADRS_TYPE_W-1:0] adrs_type,
+        input logic [slh_pkg::ADRS_WORD_W-1:0] keypair_addr,
         input logic [slh_pkg::ADRS_WORD_W-1:0] chain_or_height,
         input logic [slh_pkg::ADRS_WORD_W-1:0] hash_or_index);
         return slh_pkg::slh_adrs_c_t'{
                     layer_addr:      slh_pkg::ADRS_LAYER_W'(layers(sch) - 1
                                                             - int'(ctrl.ht_layer)),
-                    tree_addr:       slh_pkg::ADRS_TREE_W'(ctrl.tree_idx),
+                    tree_addr:       slh_pkg::ADRS_TREE_W'(ctrl.mss_tree),
                     adrs_type:       adrs_type,
-                    keypair_addr:    (adrs_type == slh_pkg::ADRS_TREE)
-                                         ? '0 : slh_pkg::ADRS_WORD_W'(ctrl.leaf_idx),
+                    keypair_addr:    keypair_addr,
                     chain_or_height: chain_or_height,
                     hash_or_index:   hash_or_index};
+    endfunction
+
+    // SLH: the key pair address of a WOTS hash is the leaf the key pair sits
+    // at, where the Merkle walk of its tree starts
+    function automatic logic [slh_pkg::ADRS_WORD_W-1:0] ctrl2keypair(input ctrl_t ctrl);
+        return slh_pkg::ADRS_WORD_W'(ctrl.mrkl_leaf);
     endfunction
 
     // SLH: the nodes of a tree level are numbered from zero, so the parent's
@@ -220,7 +229,7 @@ package hbsv_schs_pkg;
         return slh_pkg::ADRS_WORD_W'(ctrl.mrkl_leaf) >> ctrl.mrkl_level >> 1;
     endfunction
     function automatic logic [slh_pkg::ADRS_WORD_W-1:0] ctrl2fors_leaf(input ctrl_t ctrl);
-        return (slh_pkg::ADRS_WORD_W'(ctrl.mrkl_tree) << slh_pkg::SLH_A)
+        return (slh_pkg::ADRS_WORD_W'(ctrl.fors_tree) << slh_pkg::SLH_A)
                | slh_pkg::ADRS_WORD_W'(ctrl.mrkl_leaf);
     endfunction
     function automatic logic [slh_pkg::ADRS_WORD_W-1:0] ctrl2fors_index(input ctrl_t ctrl);
@@ -336,8 +345,8 @@ package hbsv_schs_pkg;
 
     typedef struct packed {
         logic [MAX_SIGNAND_W-1:0] signand;
-        logic [TREE_IDX_W-1:0]    tree_idx;
-        logic [LEAF_IDX_W-1:0]    leaf_idx;
+        logic [MSS_TREE_W-1:0]    tree_idx;
+        logic [MRKL_LEAF_W-1:0]   leaf_idx;
     } msg_digest_t;
 
     function automatic msg_digest_t msg_digest_split(
@@ -349,8 +358,8 @@ package hbsv_schs_pkg;
             SCHEME_HSS:      return '0;
             SCHEME_SLH_128S: return msg_digest_t'{
                     signand:  MAX_SIGNAND_W'(slh_digest.md),
-                    tree_idx: TREE_IDX_W'(slh_digest.tree_field[slh_pkg::SLH_IDX_TREE_W-1:0]),
-                    leaf_idx: LEAF_IDX_W'(slh_digest.leaf_field[slh_pkg::SLH_IDX_LEAF_W-1:0])};
+                    tree_idx: MSS_TREE_W'(slh_digest.tree_field[slh_pkg::SLH_IDX_TREE_W-1:0]),
+                    leaf_idx: MRKL_LEAF_W'(slh_digest.leaf_field[slh_pkg::SLH_IDX_LEAF_W-1:0])};
             default:         return '0;
         endcase
     endfunction
@@ -386,15 +395,16 @@ package hbsv_schs_pkg;
                     i:     kctx,
                     q:     ctrl2q(ctrl),
                     chain: hss_pkg::CHAIN_W'(ctrl.chain_idx),
-                    step:  hss_pkg::STEP_W'(ctrl.hash_idx),
+                    step:  hss_pkg::STEP_W'(ctrl.chain_step),
                     tmp:   tmp});
             SCHEME_SLH_128S: return MAX_OTS_CHAIN_MSG_BITS'(slh_pkg::slh_f_msg_t'{
                     seed_block: slh_seed_block(kctx),
                     adrs:       slh_adrs(.sch             (sch),
                                          .ctrl            (ctrl),
                                          .adrs_type       (slh_pkg::ADRS_WOTS_HASH),
+                                         .keypair_addr    (ctrl2keypair(ctrl)),
                                          .chain_or_height (slh_pkg::ADRS_WORD_W'(ctrl.chain_idx)),
-                                         .hash_or_index   (slh_pkg::ADRS_WORD_W'(ctrl.hash_idx))),
+                                         .hash_or_index   (slh_pkg::ADRS_WORD_W'(ctrl.chain_step))),
                     m1:         slh_pkg::SLH_NW'(tmp)});
             default:         return '0;
         endcase
@@ -436,6 +446,7 @@ package hbsv_schs_pkg;
                     adrs:       slh_adrs(.sch             (sch),
                                          .ctrl            (ctrl),
                                          .adrs_type       (slh_pkg::ADRS_WOTS_PK),
+                                         .keypair_addr    (ctrl2keypair(ctrl)),
                                          .chain_or_height ('0),
                                          .hash_or_index   ('0))});
             default:         return '0;
@@ -546,6 +557,7 @@ package hbsv_schs_pkg;
                     adrs:       slh_adrs(.sch             (sch),
                                          .ctrl            (ctrl),
                                          .adrs_type       (slh_pkg::ADRS_TREE),
+                                         .keypair_addr    ('0),
                                          .chain_or_height (ctrl2height(ctrl)),
                                          .hash_or_index   (ctrl2tree_index(ctrl))),
                     left:       slh_pkg::SLH_NW'(left),
@@ -559,22 +571,27 @@ package hbsv_schs_pkg;
     // the most significant first), the leaf hash over the secret element,
     // the parent hash, and the prefix the tree roots are accumulated behind
     // (as wide as the OTS one, the accumulation is shared)
+    //
+    // The FORS instance belongs to the key pair whose chains sign its roots,
+    // and its hashes carry that key pair's address. While the walk is in a
+    // FORS tree the Merkle fields address that tree, so the builders take
+    // the key pair's leaf (kp_leaf) as an argument.
     // -------------------------------------------------------------------------
 
-    function automatic logic [LEAF_IDX_W-1:0] fors_leaf_idx(
+    function automatic logic [MRKL_LEAF_W-1:0] fors_leaf_idx(
         input sch_e                     sch,
         input logic [MAX_SIGNAND_W-1:0] signand,
-        input logic [MRKL_TREE_W-1:0]   fors_tree);
+        input logic [FORS_TREE_W-1:0]   fors_tree);
         logic [slh_pkg::SLH_A-1:0] slh_digit;
         slh_digit = '0;
         for (int unsigned i = 0; i < slh_pkg::SLH_K; i++) begin
-            if (fors_tree == MRKL_TREE_W'(i)) begin
+            if (fors_tree == FORS_TREE_W'(i)) begin
                 slh_digit = signand[slh_pkg::SLH_MD_W-1 - slh_pkg::SLH_A*i -: slh_pkg::SLH_A];
             end
         end
         case (sch)
             SCHEME_HSS:      return '0;
-            SCHEME_SLH_128S: return LEAF_IDX_W'(slh_digit);
+            SCHEME_SLH_128S: return MRKL_LEAF_W'(slh_digit);
             default:         return '0;
         endcase
     endfunction
@@ -582,10 +599,11 @@ package hbsv_schs_pkg;
     localparam int unsigned FORS_LEAF_MSG_BITS = $bits(slh_pkg::slh_f_msg_t);
 
     function automatic logic [FORS_LEAF_MSG_BITS-1:0] fors_leaf_msg(
-        input sch_e                  sch,
-        input logic [MAX_KCTX_W-1:0] kctx,
-        input ctrl_t                 ctrl,
-        input logic [MAX_DATA_W-1:0] secret);
+        input sch_e                   sch,
+        input logic [MAX_KCTX_W-1:0]  kctx,
+        input logic [MRKL_LEAF_W-1:0] kp_leaf,
+        input ctrl_t                  ctrl,
+        input logic [MAX_DATA_W-1:0]  secret);
         case (sch)
             SCHEME_HSS:      return '0;
             SCHEME_SLH_128S: return slh_pkg::slh_f_msg_t'{
@@ -593,6 +611,7 @@ package hbsv_schs_pkg;
                     adrs:       slh_adrs(.sch             (sch),
                                          .ctrl            (ctrl),
                                          .adrs_type       (slh_pkg::ADRS_FORS_TREE),
+                                         .keypair_addr    (slh_pkg::ADRS_WORD_W'(kp_leaf)),
                                          .chain_or_height ('0),
                                          .hash_or_index   (ctrl2fors_leaf(ctrl))),
                     m1:         slh_pkg::SLH_NW'(secret)};
@@ -603,11 +622,12 @@ package hbsv_schs_pkg;
     localparam int unsigned FORS_JOIN_MSG_BITS = $bits(slh_pkg::slh_h_msg_t);
 
     function automatic logic [FORS_JOIN_MSG_BITS-1:0] fors_join_msg(
-        input sch_e                  sch,
-        input logic [MAX_KCTX_W-1:0] kctx,
-        input ctrl_t                 ctrl,
-        input logic [MAX_DATA_W-1:0] left,
-        input logic [MAX_DATA_W-1:0] right);
+        input sch_e                   sch,
+        input logic [MAX_KCTX_W-1:0]  kctx,
+        input logic [MRKL_LEAF_W-1:0] kp_leaf,
+        input ctrl_t                  ctrl,
+        input logic [MAX_DATA_W-1:0]  left,
+        input logic [MAX_DATA_W-1:0]  right);
         case (sch)
             SCHEME_HSS:      return '0;
             SCHEME_SLH_128S: return slh_pkg::slh_h_msg_t'{
@@ -615,6 +635,7 @@ package hbsv_schs_pkg;
                     adrs:       slh_adrs(.sch             (sch),
                                          .ctrl            (ctrl),
                                          .adrs_type       (slh_pkg::ADRS_FORS_TREE),
+                                         .keypair_addr    (slh_pkg::ADRS_WORD_W'(kp_leaf)),
                                          .chain_or_height (ctrl2height(ctrl)),
                                          .hash_or_index   (ctrl2fors_index(ctrl))),
                     left:       slh_pkg::SLH_NW'(left),
@@ -624,9 +645,10 @@ package hbsv_schs_pkg;
     endfunction
 
     function automatic logic [MAX_OTS_PK_PREFIX_BITS-1:0] fors_pk_prefix(
-        input sch_e                  sch,
-        input logic [MAX_KCTX_W-1:0] kctx,
-        input ctrl_t                 ctrl);
+        input sch_e                   sch,
+        input logic [MAX_KCTX_W-1:0]  kctx,
+        input logic [MRKL_LEAF_W-1:0] kp_leaf,
+        input ctrl_t                  ctrl);
         case (sch)
             SCHEME_HSS:      return '0;
             SCHEME_SLH_128S: return MAX_OTS_PK_PREFIX_BITS'(slh_pkg::slh_t_prefix_t'{
@@ -634,6 +656,7 @@ package hbsv_schs_pkg;
                     adrs:       slh_adrs(.sch             (sch),
                                          .ctrl            (ctrl),
                                          .adrs_type       (slh_pkg::ADRS_FORS_ROOTS),
+                                         .keypair_addr    (slh_pkg::ADRS_WORD_W'(kp_leaf)),
                                          .chain_or_height ('0),
                                          .hash_or_index   ('0))});
             default:         return '0;

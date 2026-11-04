@@ -180,7 +180,8 @@ module hss_verify
     // index of its tree; both move up a layer at a time.
     // Both at the scheme's width: a leaf index is TREE_HT bits, the tree
     // index the hypertree's remaining (LAYERS-1)*TREE_HT bits (HSS: unused);
-    // ctrl_t carries them zero-extended.
+    // ctrl_t carries them zero-extended, the leaf as the Merkle walk's
+    // starting leaf outside FORS.
     localparam int unsigned LEAF_W = TREE_HT;
     localparam int unsigned TREE_W = (LAYERS - 1) * TREE_HT;
     logic [LEAF_W-1:0]      leaf_idx_q,   leaf_idx_d;
@@ -209,13 +210,13 @@ module hss_verify
     logic [4:0]       blk_idx_q,     blk_idx_d;
 
     // WOTS counters (driven by WOTS sub-FSM)
-    logic [CHAIN_IDX_W-1:0] wots_chain_q, wots_chain_d; // chain index 0..OTS_LEN-1
-    logic [HASH_IDX_W-1:0]  wots_step_q,  wots_step_d;  // step within chain
+    logic [CHAIN_IDX_W-1:0]  wots_chain_q, wots_chain_d; // chain index 0..OTS_LEN-1
+    logic [CHAIN_STEP_W-1:0] wots_step_q,  wots_step_d;  // step within chain
 
     // Merkle tree level (driven by Merkle sub-FSM) and FORS tree index
     // (driven by the sequencer)
     logic [MRKL_LEVEL_W-1:0] mrkl_level_q, mrkl_level_d;
-    logic [MRKL_TREE_W-1:0]  fors_tree_q,  fors_tree_d;
+    logic [FORS_TREE_W-1:0]  fors_tree_q,  fors_tree_d;
 
     // Kc interleaved accumulation (replaces the former 34 x 256-bit pk store):
     // the banked endpoints, the current carry and the staged next carry (the
@@ -281,26 +282,29 @@ module hss_verify
     wire [KCTX_W-1:0] cur_I = (is_pk_layer || !HAS_HDR) ? identifier
                                                         : cur_I_q;
 
+    // Leaf index of the key pair in the current tree as the messages read
+    // it: HSS with the header's overflow riding at bit TREE_HT
+    wire [MRKL_LEAF_W-1:0] kp_leaf = MRKL_LEAF_W'({leaf_ovf_q, leaf_idx_q});
+
     // Leaf the Merkle walk starts from: the key pair's, or the one the
     // current FORS tree reveals (its digit of the signand)
-    wire [LEAF_IDX_W-1:0] mrkl_leaf =
+    wire [MRKL_LEAF_W-1:0] mrkl_leaf =
             (seq_q == StFors) ? fors_leaf_idx(.sch       (SCH),
                                               .signand   (MAX_SIGNAND_W'(aux_reg_q)),
                                               .fors_tree (fors_tree_q))
-                              : LEAF_IDX_W'(leaf_idx_q);
+                              : kp_leaf;
 
     // -------------------------------------------------------------------------
     // Control bundle — the counters in the form the hash messages read them
     // -------------------------------------------------------------------------
 
     wire ctrl_t ctrl = '{ht_layer:   layer_q,
-                         chain_idx:  wots_chain_q,
-                         hash_idx:   wots_step_q,
+                         mss_tree:   MSS_TREE_W'(tree_idx_q),
+                         mrkl_leaf:  mrkl_leaf,
                          mrkl_level: mrkl_level_q,
-                         leaf_idx:   LEAF_IDX_W'({leaf_ovf_q, leaf_idx_q}),
-                         tree_idx:   TREE_IDX_W'(tree_idx_q),
-                         mrkl_tree:  fors_tree_q,
-                         mrkl_leaf:  mrkl_leaf};
+                         chain_idx:  wots_chain_q,
+                         chain_step: wots_step_q,
+                         fors_tree:  fors_tree_q};
 
     // -------------------------------------------------------------------------
     // Data indexed by WOTS chain / Merkle level
@@ -484,12 +488,13 @@ module hss_verify
     wire kc_done  = !kc_closes || kc_saved;
 
     wire [KC_PREFIX_W-1:0] kc_prefix =
-            (seq_q == StWots) ? KC_PREFIX_W'(ots_pk_prefix( .sch  (SCH),
-                                                            .kctx (cur_I),
-                                                            .ctrl (ctrl)))
-                              : KC_PREFIX_W'(fors_pk_prefix(.sch  (SCH),
-                                                            .kctx (cur_I),
-                                                            .ctrl (ctrl)));
+            (seq_q == StWots) ? KC_PREFIX_W'(ots_pk_prefix( .sch     (SCH),
+                                                            .kctx    (cur_I),
+                                                            .ctrl    (ctrl)))
+                              : KC_PREFIX_W'(fors_pk_prefix(.sch     (SCH),
+                                                            .kctx    (cur_I),
+                                                            .kp_leaf (kp_leaf),
+                                                            .ctrl    (ctrl)));
 
     // First absorb: the prefix, the first banked endpoints and the top of
     // the closing one. Later ones: the carry, the bank and the next top.
@@ -574,10 +579,11 @@ module hss_verify
 
     localparam int unsigned FORS_LEAF_MSG_W = FORS_LEAF_MSG_BITS;
 
-    wire [FORS_LEAF_MSG_W-1:0] fors_leaf_data = fors_leaf_msg(.sch    (SCH),
-                                                              .kctx   (cur_I),
-                                                              .ctrl   (ctrl),
-                                                              .secret (MAX_DATA_W'(data)));
+    wire [FORS_LEAF_MSG_W-1:0] fors_leaf_data = fors_leaf_msg(.sch     (SCH),
+                                                              .kctx    (cur_I),
+                                                              .kp_leaf (kp_leaf),
+                                                              .ctrl    (ctrl),
+                                                              .secret  (MAX_DATA_W'(data)));
 
     localparam int unsigned FORS_LEAF_BLOCKS    = calc_sha_blocks($bits(fors_leaf_data));
     localparam int unsigned FORS_LEAF_PAD_ZEROS = calc_sha_pad_zeros($bits(fors_leaf_data));
@@ -635,11 +641,12 @@ module hss_verify
 
     localparam int unsigned FORS_JOIN_MSG_W = FORS_JOIN_MSG_BITS;
 
-    wire [FORS_JOIN_MSG_W-1:0] fors_join_data = fors_join_msg(.sch   (SCH),
-                                                              .kctx  (cur_I),
-                                                              .ctrl  (ctrl),
-                                                              .left  (MAX_DATA_W'(left_node)),
-                                                              .right (MAX_DATA_W'(right_node)));
+    wire [FORS_JOIN_MSG_W-1:0] fors_join_data = fors_join_msg(.sch     (SCH),
+                                                              .kctx    (cur_I),
+                                                              .kp_leaf (kp_leaf),
+                                                              .ctrl    (ctrl),
+                                                              .left    (MAX_DATA_W'(left_node)),
+                                                              .right   (MAX_DATA_W'(right_node)));
 
     localparam int unsigned FORS_JOIN_BLOCKS    = calc_sha_blocks($bits(fors_join_data));
     localparam int unsigned FORS_JOIN_PAD_ZEROS = calc_sha_pad_zeros($bits(fors_join_data));
@@ -938,7 +945,7 @@ module hss_verify
                     // Stall until the next chain element arrives.
                     if (valid) begin
                         // load step counter from the signed digit
-                        wots_step_d = HASH_IDX_W'(cur_digit);
+                        wots_step_d = CHAIN_STEP_W'(cur_digit);
                         // hash_reg captures the chain signature this cycle too
                         // (outside this always_comb since hash_reg is shared)
 
@@ -956,8 +963,8 @@ module hss_verify
 
                         // continue hashing if this was not the last hash,
                         // otherwise move to fold the endpoint into Kc
-                        wots_d = (wots_step_q != HASH_IDX_W'(DIGIT_MAX-1)) ? StWotsHash
-                                                                           : StWotsAccum;
+                        wots_d = (wots_step_q != CHAIN_STEP_W'(DIGIT_MAX-1)) ? StWotsHash
+                                                                             : StWotsAccum;
                     end
                 end
 
