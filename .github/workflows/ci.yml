@@ -5,7 +5,7 @@ on:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # setup-verilator has no ubuntu-26.04 build
     timeout-minutes: 10
 
     steps:
@@ -38,7 +38,7 @@ jobs:
         working-directory: verilog
 
   simulate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # setup-verilator has no ubuntu-26.04 build
     timeout-minutes: 60
     strategy:
       matrix:
